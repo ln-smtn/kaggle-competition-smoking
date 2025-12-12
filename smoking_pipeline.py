@@ -12,7 +12,7 @@ import xgboost as xgb
 from catboost import CatBoostClassifier
 from sklearn.base import BaseEstimator, TransformerMixin, ClassifierMixin
 from sklearn.pipeline import Pipeline, FeatureUnion
-from sklearn.preprocessing import StandardScaler, LabelEncoder
+from sklearn.preprocessing import StandardScaler, LabelEncoder, RobustScaler
 from sklearn.model_selection import StratifiedKFold
 from sklearn.metrics import roc_auc_score
 from sklearn.feature_selection import (
@@ -59,6 +59,8 @@ def get_input():
     # Удаление id и целевой переменной из признаков
     X_train = train.drop(['id', 'smoking'], axis=1)
     X_test = test.drop(['id'], axis=1)
+
+
     
     return X_train.values, y_train.values, X_test.values, test_ids.values
 
@@ -101,27 +103,43 @@ class FeatureEngineeringTransformer(BaseEstimator, TransformerMixin):
         return df.values
     
     def _create_basic_features(self, df):
-        """Создание базовых признаков"""
+        """Создание базовых признаков + изменяем старые"""
         df = df.copy()
-        
-        # BMI (Body Mass Index)
+
+        # изменим на max и min
+        best = np.where(df['hearing(left)'] < df['hearing(right)'],
+                        df['hearing(left)'],  df['hearing(right)'])
+        worst = np.where(df['hearing(left)'] < df['hearing(right)'],
+                         df['hearing(right)'],  df['hearing(left)'])
+        df['hearing(left)'] = best - 1
+        df['hearing(right)'] = worst - 1
+
+
+        df['eyesight(left)'] = np.where(df['eyesight(left)'] > 9, 0, df['eyesight(left)'])
+        df['eyesight(right)'] = np.where(df['eyesight(right)'] > 9, 0, df['eyesight(right)'])
+        best = np.where(df['eyesight(left)'] < df['eyesight(right)'],
+                        df['eyesight(left)'],  df['eyesight(right)'])
+        worst = np.where(df['eyesight(left)'] < df['eyesight(right)'],
+                         df['eyesight(right)'],  df['eyesight(left)'])
+        df['eyesight(left)'] = best
+        df['eyesight(right)'] = worst
+        ## Смешная нарезка детей
+        df['Gtp'] = np.clip(df['Gtp'], 0, 300)
+        df['HDL'] = np.clip(df['HDL'], 0, 110)
+        df['LDL'] = np.clip(df['LDL'], 0, 200)
+        df['ALT'] = np.clip(df['ALT'], 0, 150)
+        df['AST'] = np.clip(df['AST'], 0, 100)
+        df['serum creatinine'] = np.clip(df['serum creatinine'], 0, 3)
+
+
+    # BMI (Body Mass Index)
         if 'height(cm)' in df.columns and 'weight(kg)' in df.columns:
             df['BMI'] = df['weight(kg)'] / ((df['height(cm)'] / 100) ** 2)
         
         # Отношение талии к росту
         if 'waist(cm)' in df.columns and 'height(cm)' in df.columns:
             df['WHR'] = df['waist(cm)'] / df['height(cm)']
-        
-        # Среднее зрение
-        if 'eyesight(left)' in df.columns and 'eyesight(right)' in df.columns:
-            df['eyesight_mean'] = (df['eyesight(left)'] + df['eyesight(right)']) / 2
-            df['eyesight_diff'] = abs(df['eyesight(left)'] - df['eyesight(right)'])
-        
-        # Средний слух
-        if 'hearing(left)' in df.columns and 'hearing(right)' in df.columns:
-            df['hearing_mean'] = (df['hearing(left)'] + df['hearing(right)']) / 2
-            df['hearing_diff'] = abs(df['hearing(left)'] - df['hearing(right)'])
-        
+
         # Пульсовое давление
         if 'systolic' in df.columns and 'relaxation' in df.columns:
             df['pulse_pressure'] = df['systolic'] - df['relaxation']
@@ -150,115 +168,11 @@ class FeatureEngineeringTransformer(BaseEstimator, TransformerMixin):
     
     def _create_advanced_features(self, df):
         """Создание расширенных признаков"""
-        df = df.copy()
-        
-        # Только самые важные признаки для полиномиальных преобразований
-        # Фокус на признаках, которые наиболее связаны с курением
-        top_features = ['age', 'BMI', 'systolic', 'hemoglobin', 'Cholesterol', 'HDL', 'LDL']
-        
-        for feat in top_features:
-            if feat in df.columns:
-                # Квадрат признака (для нелинейных зависимостей)
-                df[f'{feat}_squared'] = df[feat] ** 2
-                # Логарифм (для положительных значений, нормализует распределение)
-                if (df[feat] > 0).all():
-                    df[f'{feat}_log'] = np.log1p(df[feat])
-        
-        # Только самые важные взаимодействия (клинически значимые)
-        # Избегаем создания всех возможных комбинаций
-        important_interactions = [
-            ('age', 'BMI'),           # Возраст и вес - важный фактор
-            ('age', 'systolic'),      # Возраст и давление
-            ('BMI', 'hemoglobin'),    # Вес и гемоглобин
-            ('HDL', 'LDL'),           # Хороший и плохой холестерин
-            ('systolic', 'relaxation'), # Систолическое и диастолическое давление
-            ('AST', 'ALT'),           # Ферменты печени
-        ]
-        
-        for feat1, feat2 in important_interactions:
-            if feat1 in df.columns and feat2 in df.columns:
-                # Умножение (взаимодействие)
-                df[f'{feat1}_x_{feat2}'] = df[feat1] * df[feat2]
-                # Деление (отношение)
-                df[f'{feat1}_div_{feat2}'] = df[feat1] / (df[feat2] + 1e-6)
-        
-        # Заполнение NaN значений медианой
-        df = df.fillna(df.median())
+
         
         return df
 
-
-# ============================================================================
-# FEATURE TREATMENT (Preprocessing)
-# ============================================================================
-
-class OutlierTreatmentTransformer(BaseEstimator, TransformerMixin):
-    """Обработка выбросов методом IQR (5-95 перцентили)"""
-    
-    def __init__(self):
-        self.lower_bounds_ = None
-        self.upper_bounds_ = None
-    
-    def fit(self, X, y=None):
-        X = np.array(X) if not isinstance(X, np.ndarray) else X
-        self.lower_bounds_ = []
-        self.upper_bounds_ = []
-        
-        for col_idx in range(X.shape[1]):
-            col_data = X[:, col_idx]
-            Q1 = np.percentile(col_data, 5)  # Используем 5-95 перцентили
-            Q3 = np.percentile(col_data, 95)
-            IQR = Q3 - Q1
-            self.lower_bounds_.append(Q1 - 1.5 * IQR)
-            self.upper_bounds_.append(Q3 + 1.5 * IQR)
-        
-        return self
-    
-    def transform(self, X):
-        X = np.array(X) if not isinstance(X, np.ndarray) else X.copy()
-        X = X.copy()
-        
-        for col_idx in range(X.shape[1]):
-            X[:, col_idx] = np.clip(
-                X[:, col_idx],
-                self.lower_bounds_[col_idx],
-                self.upper_bounds_[col_idx]
-            )
-        
-        return X
-
-
-class MissingValueTreatmentTransformer(BaseEstimator, TransformerMixin):
-    """Обработка пропущенных значений"""
-    
-    def __init__(self):
-        self.median_values_ = None
-    
-    def fit(self, X, y=None):
-        X = np.array(X) if not isinstance(X, np.ndarray) else X
-        self.median_values_ = []
-        
-        for col_idx in range(X.shape[1]):
-            col_data = X[:, col_idx]
-            # Используем медиану для заполнения пропусков
-            median_val = np.nanmedian(col_data)
-            self.median_values_.append(median_val)
-        
-        return self
-    
-    def transform(self, X):
-        X = np.array(X) if not isinstance(X, np.ndarray) else X.copy()
-        X = X.copy()
-        
-        # Заполнение пропусков медианой
-        for col_idx in range(X.shape[1]):
-            col_data = X[:, col_idx]
-            mask = np.isnan(col_data)
-            if mask.any():
-                X[mask, col_idx] = self.median_values_[col_idx]
-        
-        return X
-
+# Пропущенных значений нет
 
 # ============================================================================
 # FEATURE JITTERING (Data Augmentation)
@@ -1309,17 +1223,11 @@ def main():
     print(f"После Feature Engineering: {X_train_fe.shape[1]} признаков")
     
     # Feature Treatment
-    mv_transformer = MissingValueTreatmentTransformer()
-    ot_transformer = OutlierTreatmentTransformer()
-    
-    X_train_fe = mv_transformer.fit_transform(X_train_fe)
-    X_test_fe = mv_transformer.transform(X_test_fe)
-    
-    X_train_fe = ot_transformer.fit_transform(X_train_fe)
-    X_test_fe = ot_transformer.transform(X_test_fe)
-    
+    # Пропущенных значений нет
+    # Выбросы фиксим чуть-чуть
+
     # Feature Transform
-    scaler = StandartScalerTransformer()
+    scaler = StandardScaler()
     X_train_scaled = scaler.fit_transform(X_train_fe)
     X_test_scaled = scaler.transform(X_test_fe)
     
@@ -1362,7 +1270,7 @@ def main():
     use_optuna = True  # 
     if use_optuna and OPTUNA_AVAILABLE:
         print("\n>>> Запуск оптимизации...")
-        optuna_optimizer = OptunaOptimizer(model_type='lgb', n_trials=15, cv=3)
+        optuna_optimizer = OptunaOptimizer(model_type='lgb', n_trials=30, cv=3)
         best_lgb_params = optuna_optimizer.optimize(X_train_final, y_train)
         
         lgb_params = {
