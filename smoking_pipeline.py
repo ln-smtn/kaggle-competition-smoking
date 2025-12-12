@@ -12,8 +12,10 @@ import xgboost as xgb
 from catboost import CatBoostClassifier
 from sklearn.base import BaseEstimator, TransformerMixin, ClassifierMixin
 from sklearn.pipeline import Pipeline, FeatureUnion
+from sklearn.model_selection._split import check_cv
+from sklearn.base import clone, is_classifier
 from sklearn.preprocessing import StandardScaler, LabelEncoder
-from sklearn.model_selection import StratifiedKFold
+from sklearn.model_selection import StratifiedKFold, cross_val_score
 from sklearn.metrics import roc_auc_score
 from sklearn.feature_selection import (
     VarianceThreshold, SelectKBest, mutual_info_classif, 
@@ -153,33 +155,31 @@ class FeatureEngineeringTransformer(BaseEstimator, TransformerMixin):
         df = df.copy()
         
         # Только самые важные признаки для полиномиальных преобразований
-        # Фокус на признаках, которые наиболее связаны с курением
         top_features = ['age', 'BMI', 'systolic', 'hemoglobin', 'Cholesterol', 'HDL', 'LDL']
         
         for feat in top_features:
             if feat in df.columns:
-                # Квадрат признака (для нелинейных зависимостей)
+                # Квадрат признака
                 df[f'{feat}_squared'] = df[feat] ** 2
-                # Логарифм (для положительных значений, нормализует распределение)
+                # Логарифм
                 if (df[feat] > 0).all():
                     df[f'{feat}_log'] = np.log1p(df[feat])
         
         # Только самые важные взаимодействия (клинически значимые)
-        # Избегаем создания всех возможных комбинаций
         important_interactions = [
-            ('age', 'BMI'),           # Возраст и вес - важный фактор
-            ('age', 'systolic'),      # Возраст и давление
-            ('BMI', 'hemoglobin'),    # Вес и гемоглобин
-            ('HDL', 'LDL'),           # Хороший и плохой холестерин
-            ('systolic', 'relaxation'), # Систолическое и диастолическое давление
-            ('AST', 'ALT'),           # Ферменты печени
+            ('age', 'BMI'),
+            ('age', 'systolic'),
+            ('BMI', 'hemoglobin'),
+            ('HDL', 'LDL'),
+            ('systolic', 'relaxation'),
+            ('AST', 'ALT'),
         ]
         
         for feat1, feat2 in important_interactions:
             if feat1 in df.columns and feat2 in df.columns:
-                # Умножение (взаимодействие)
+                # Умножение
                 df[f'{feat1}_x_{feat2}'] = df[feat1] * df[feat2]
-                # Деление (отношение)
+                # Деление
                 df[f'{feat1}_div_{feat2}'] = df[feat1] / (df[feat2] + 1e-6)
         
         # Заполнение NaN значений медианой
@@ -332,23 +332,42 @@ class VarianceThresholdTransformer(BaseEstimator, TransformerMixin):
 class CorrelationFilterTransformer(BaseEstimator, TransformerMixin):
     """Быстрый фильтр - оставляем фичи с non-0 корреляцией с таргетом"""
     
-    def __init__(self, threshold=0.01):
+    def __init__(self, threshold=0.0, cv=5):
         self.threshold = threshold
+        self.cv = cv
         self.selected_features_ = None
     
     def fit(self, X, y):
         X = np.array(X) if not isinstance(X, np.ndarray) else X
         y = np.array(y) if not isinstance(y, np.ndarray) else y
         
-        # Вычисляем корреляции с таргетом
-        correlations = []
-        for i in range(X.shape[1]):
-            corr = np.abs(np.corrcoef(X[:, i], y)[0, 1])
-            correlations.append(corr)
+        # Делаем CV внутри трансформера (как в примере)
+        cv = check_cv(self.cv, y, classifier=is_classifier(None))
         
-        correlations = np.array(correlations)
-        # Оставляем признаки с корреляцией выше порога
-        self.selected_features_ = np.where(correlations > self.threshold)[0]
+        # Собираем выбранные признаки по всем фолдам
+        all_selected_features = []
+        
+        for train_idx, _ in cv.split(X, y):
+            X_train_fold = X[train_idx]
+            y_train_fold = y[train_idx]
+            
+            # Вычисляем корреляции с таргетом на train части фолда
+            correlations = []
+            for i in range(X_train_fold.shape[1]):
+                corr = np.abs(np.corrcoef(X_train_fold[:, i], y_train_fold)[0, 1])
+                correlations.append(corr)
+            
+            correlations = np.array(correlations)
+            # Оставляем признаки с корреляцией выше порога
+            selected = np.where(correlations > self.threshold)[0]
+            all_selected_features.append(set(selected))
+        
+        # Выбираем признаки, которые встречаются хотя бы в одном фолде (объединение)
+        # Это менее строго, чем пересечение, и сохраняет больше признаков
+        if all_selected_features:
+            self.selected_features_ = np.array(list(set.union(*all_selected_features)))
+        else:
+            self.selected_features_ = np.arange(X.shape[1])
         
         return self
     
@@ -546,7 +565,7 @@ class BorutaFeatureSelector(BaseEstimator, TransformerMixin):
 # ============================================================================
 
 class LightGBMClassifierCV(BaseEstimator, ClassifierMixin):
-    """LightGBM классификатор с кросс-валидацией"""
+    """LightGBM классификатор с кросс-валидацией (для финального обучения)"""
     
     def __init__(self, lgb_params=None, fit_params=None, cv=5):
         self.lgb_params = lgb_params or {}
@@ -594,7 +613,7 @@ class LightGBMClassifierCV(BaseEstimator, ClassifierMixin):
                 valid_sets=[val_data],
                 num_boost_round=700,  
                 callbacks=[
-                    lgb.early_stopping(stopping_rounds=50),  # Останавливается при отсутствии улучшения 50 раундов
+                    lgb.early_stopping(stopping_rounds=50),
                     lgb.log_evaluation(0)
                 ],
                 **self.fit_params
@@ -1279,18 +1298,29 @@ def main():
     """
     СИЛЬНЫЙ BASELINE С LIGHTGBM
     
-    Пайплайн:
+    Пайплайн с правильной CV стратегией (как в примере):
     1. Data Collection & Split
     2. Feature Engineering (улучшенные признаки)
     3. Feature Transform (стандартизация)
     4. Feature Treatment (пропуски, выбросы)
     5. Feature Selection (удаление шумных признаков, высокий signal2noise)
+      Все шаги, использующие y, делают CV ВНУТРИ себя!
     6. Model Trainer (LightGBM с оптимизацией гиперпараметров)
+    
+    Используется sklearn Pipeline (как в примере):
+    - CorrelationFilterTransformer делает CV внутри себя
+    - LightGBMClassifierCV делает CV внутри себя
+    - Pipeline.fit() вызывается один раз на всех данных
+    - После fit() можно получить cv_scores из named_steps
     """
     
-    # Загрузка данных
-    print("\n1. DATA COLLECTION & SPLIT")
-    print("-" * 60)
+    # ========================================================================
+    # ШАГ 1: DATA COLLECTION & SPLIT
+    # ========================================================================
+    print("\n" + "="*70)
+    print("ШАГ 1: DATA COLLECTION & SPLIT")
+    print("="*70)
+    
     X_train, y_train, X_test, test_ids = get_input()
     
     print(f"✓ Размер обучающей выборки: {X_train.shape}")
@@ -1298,72 +1328,39 @@ def main():
     print(f"✓ Размер целевой переменной: {y_train.shape}")
     print(f"✓ Распределение классов: {np.bincount(y_train)}")
     
-    # Предобработка данных
-    print("\n2. FEATURE ENGINEERING & PREPROCESSING")
-    print("-" * 60)
+
+    
+    # Для оптимизации нужно применить трансформеры до CorrelationFilter
     
     fe_transformer = FeatureEngineeringTransformer()
-    X_train_fe = fe_transformer.fit_transform(X_train)
-    X_test_fe = fe_transformer.transform(X_test)
-    
-    print(f"После Feature Engineering: {X_train_fe.shape[1]} признаков")
-    
-    # Feature Treatment
     mv_transformer = MissingValueTreatmentTransformer()
     ot_transformer = OutlierTreatmentTransformer()
-    
-    X_train_fe = mv_transformer.fit_transform(X_train_fe)
-    X_test_fe = mv_transformer.transform(X_test_fe)
-    
-    X_train_fe = ot_transformer.fit_transform(X_train_fe)
-    X_test_fe = ot_transformer.transform(X_test_fe)
-    
-    # Feature Transform
-    scaler = StandartScalerTransformer()
-    X_train_scaled = scaler.fit_transform(X_train_fe)
-    X_test_scaled = scaler.transform(X_test_fe)
-    
-    print(f"После масштабирования: {X_train_scaled.shape}")
-    
-    # Feature Selection - отбор признаков по корреляции
-    print("\n3. FEATURE SELECTION - ОТБОР ПО КОРРЕЛЯЦИИ")
-    print("-" * 60)
-    
-    # Быстрый фильтр по корреляции с таргетом
-    print("Отбор признаков по корреляции с таргетом...")
-    corr_filter = CorrelationFilterTransformer(threshold=0.0)
-    X_train_final = corr_filter.fit_transform(X_train_scaled, y_train)
-    X_test_final = corr_filter.transform(X_test_scaled)
-    print(f"  После фильтрации по корреляции: {X_train_final.shape[1]} признаков")
-    
-    # Дополнительная фильтрация: VarianceThreshold (удаляем признаки с нулевой дисперсией)
-    print("  Фильтрация по дисперсии...")
+    scaler_transformer = StandartScalerTransformer()
     vt_transformer = VarianceThresholdTransformer(threshold=0.0)
-    X_train_final = vt_transformer.fit_transform(X_train_final)
-    X_test_final = vt_transformer.transform(X_test_final)
-    print(f"  ✓ После фильтрации по дисперсии: {X_train_final.shape[1]} признаков")
     
+    X_train_processed = fe_transformer.fit_transform(X_train)
+    X_test_processed = fe_transformer.transform(X_test)
+    print(f"\n✓ После Feature Engineering: {X_train_processed.shape[1]} признаков")
+
+    X_train_processed = mv_transformer.fit_transform(X_train_processed)
+    X_test_processed = mv_transformer.transform(X_test_processed)
     
-    # ========================================================================
-    # ШАГ 6: MODEL TRAINER (LightGBM с оптимизацией гиперпараметров)
-    # ========================================================================
-    print("\n" + "="*70)
-    print("ШАГ 6: MODEL TRAINER - LIGHTGBM BASELINE")
-    print("="*70)
+    X_train_processed = ot_transformer.fit_transform(X_train_processed)
+    X_test_processed = ot_transformer.transform(X_test_processed)
     
-    # Оптимизация гиперпараметров
-    print("\n>>> ОПТИМИЗАЦИЯ ГИПЕРПАРАМЕТРОВ (Optuna)")
-    print("=" * 70)
+    X_train_processed = scaler_transformer.fit_transform(X_train_processed)
+    X_test_processed = scaler_transformer.transform(X_test_processed)
     
-    print("  - 3 фолда при оптимизации: быстро оценить качество параметров")
-    print("  - 5 фолдов при финальном обучении: стабильная оценка и лучшие предсказания")
-    print("=" * 70)
+    X_train_processed = vt_transformer.fit_transform(X_train_processed)
+    X_test_processed = vt_transformer.transform(X_test_processed)
     
-    use_optuna = True  # 
+    print(f"✓ После предобработки: {X_train_processed.shape[1]} признаков")
+    
+    use_optuna = True
     if use_optuna and OPTUNA_AVAILABLE:
-        print("\n>>> Запуск оптимизации...")
+        print("\n>>> Запуск оптимизации Optuna...")
         optuna_optimizer = OptunaOptimizer(model_type='lgb', n_trials=15, cv=3)
-        best_lgb_params = optuna_optimizer.optimize(X_train_final, y_train)
+        best_lgb_params = optuna_optimizer.optimize(X_train_processed, y_train)
         
         lgb_params = {
             'objective': 'binary',
@@ -1398,30 +1395,52 @@ def main():
         else:
             print("Используются базовые параметры LightGBM (Optuna отключена)")
     
-    # Обучение модели с быстрой CV стратегией (5 фолдов - стандарт)
-    print("\n>>> ОБУЧЕНИЕ LIGHTGBM С КРОСС-ВАЛИДАЦИЕЙ")
+    # ========================================================================
+    #  СОЗДАНИЕ И ОБУЧЕНИЕ PIPELINE 
+    # ====================================
     
+    # Создаем Pipeline со всеми шагами 
+    # Порядок: Feature Engineering -> Treatment -> Selection -> Transform -> Model
+    # (Selection перед Transform, чтобы не масштабировать лишние признаки)
+    pipe = Pipeline([
+        ('feature_engineering', FeatureEngineeringTransformer()),
+        ('missing_values', MissingValueTreatmentTransformer()),
+        ('outliers', OutlierTreatmentTransformer()),
+        ('variance_threshold', VarianceThresholdTransformer(threshold=0.0)),
+        ('correlation_filter', CorrelationFilterTransformer(threshold=0.0, cv=5)),  # CV внутри
+        ('scaler', StandartScalerTransformer()),  # Масштабирование после отбора признаков
+        ('lgb-cv', LightGBMClassifierCV(lgb_params=lgb_params, cv=5))  # CV внутри
+    ])
     
-    lgb_model = LightGBMClassifierCV(lgb_params=lgb_params, cv=5)  # Стандартные 5 фолдов
-    lgb_model.fit(X_train_final, y_train)
-    lgb_cv_score = lgb_model.cv_score_
-    lgb_cv_std = np.std(lgb_model.cv_scores_)
+   
+    # Обучение Pipeline 
+    print("\n>>> Обучение Pipeline на всех train данных...")
+    print("   (CV делается внутри CorrelationFilterTransformer и LightGBMClassifierCV)")
+    pipe.fit(X_train, y_train)
+    
+    # Подсчет признаков после отбора (до классификатора)
+    X_train_after_selection = pipe[:-1].transform(X_train)  # Все кроме классификатора
+    print(f"✓ После Feature Selection: {X_train_after_selection.shape[1]} признаков")
+    
+    # Получаем CV scores из named_steps (как в примере)
+    cv_scores = pipe.named_steps['lgb-cv'].cv_scores_
+    cv_mean = pipe.named_steps['lgb-cv'].cv_score_
+    cv_std = np.std(cv_scores)
+    
+    print(f"\n✓ CV ROC-AUC: {cv_mean:.5f} (+/- {cv_std:.5f})")
+    print(f"✓ ROC-AUC по фолдам:")
+    for i, score in enumerate(cv_scores, 1):
+        print(f"  Fold {i}: {score:.5f}")
     
     # ========================================================================
-    # РЕЗУЛЬТАТЫ BASELINE
+    # ПРЕДСКАЗАНИЯ НА ТЕСТОВОЙ ВЫБОРКЕ
     # ========================================================================
     print("\n" + "="*70)
-    print("РЕЗУЛЬТАТЫ BASELINE (LIGHTGBM)")
-    print("="*70)
-    print(f"Средний ROC-AUC: {lgb_cv_score:.5f} (+/- {lgb_cv_std:.5f})")
-    print(f"ROC-AUC по фолдам:")
-    for i, score in enumerate(lgb_model.cv_scores_, 1):
-        print(f"  Fold {i}: {score:.5f}")
+    print("ГЕНЕРАЦИЯ ПРЕДСКАЗАНИЙ НА ТЕСТОВОЙ ВЫБОРКЕ")
     print("="*70)
     
-    # Предсказания на тестовой выборке
-    print("\n>>> ГЕНЕРАЦИЯ ПРЕДСКАЗАНИЙ НА ТЕСТОВОЙ ВЫБОРКЕ")
-    y_pred_proba = lgb_model.predict_proba(X_test_final)[:, 1]
+    # Предсказания на тестовой выборке (как в примере)
+    y_pred_proba = pipe.predict_proba(X_test)[:, 1]
     
     print(f"✓ Форма предсказаний: {y_pred_proba.shape}")
     print(f"✓ Диапазон: [{y_pred_proba.min():.4f}, {y_pred_proba.max():.4f}]")
@@ -1440,31 +1459,43 @@ def main():
     assert submission['smoking'].isnull().sum() == 0, "Есть пропущенные значения!"
     
     # Сохранение submission файла
-    submission_filename = f'submission_baseline_lgb_cv{np.round(lgb_cv_score, 4)}.csv'
+    submission_filename = f'submission_baseline_lgb_cv{np.round(cv_mean, 4)}.csv'
     submission.to_csv(submission_filename, index=False)
     
     print(f"\n✓ Submission файл сохранен: {submission_filename}")
     print(f"✓ Размер файла: {submission.shape[0]} строк")
     
-    # Информация о финальном DataFrame
+    # ========================================================================
+    # РЕЗУЛЬТАТЫ BASELINE
+    # ========================================================================
+    print("\n" + "="*70)
+    print("РЕЗУЛЬТАТЫ BASELINE (LIGHTGBM)")
+    print("="*70)
+    print(f"📊 CV ROC-AUC (на валидационных фолдах): {cv_mean:.5f} (+/- {cv_std:.5f})")
+    print(f"ROC-AUC по фолдам:")
+    for i, score in enumerate(cv_scores, 1):
+        print(f"  Fold {i}: {score:.5f}")
+ 
+    print("="*70)
+    
+    # Информация о финальном DataFrame (получаем из Pipeline)
+    X_train_transformed = pipe[:-1].transform(X_train)  # Все кроме классификатора
     print("\n" + "="*70)
     print("ИНФОРМАЦИЯ О ФИНАЛЬНОМ DATAFRAME")
     print("="*70)
-    print(f"Финальный размер признаков: {X_train_final.shape[1]}")
-    print(f"Тип данных: {type(X_train_final)}")
-    print(f"Форма: {X_train_final.shape}")
-    print(f"Диапазон значений: [{X_train_final.min():.4f}, {X_train_final.max():.4f}]")
-    print(f"Среднее значение: {X_train_final.mean():.4f}")
-    print(f"Стандартное отклонение: {X_train_final.std():.4f}")
+    print(f"Финальный размер признаков: {X_train_transformed.shape[1]}")
+    print(f"Тип данных: {type(X_train_transformed)}")
+    print(f"Форма: {X_train_transformed.shape}")
+    print(f"Диапазон значений: [{X_train_transformed.min():.4f}, {X_train_transformed.max():.4f}]")
+    print(f"Среднее значение: {X_train_transformed.mean():.4f}")
+    print(f"Стандартное отклонение: {X_train_transformed.std():.4f}")
     print("="*70)
     
     print("\n" + "="*70)
     print("BASELINE ЗАВЕРШЕН!")
     print("="*70)
-    print("Следующие шаги (опционально):")
-    print("  - Добавить XGBoost и CatBoost")
-    print("  - Создать ансамбль моделей")
-    print("  - Применить Pseudo-labeling")
+    print(f"✓ CV ROC-AUC: {cv_mean:.5f}")
+    print(f"✓ Submission файл: {submission_filename}")
     print("="*70)
 
 
