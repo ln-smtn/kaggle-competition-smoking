@@ -48,8 +48,13 @@ except ImportError:
 
 def get_input():
     """Загрузка и подготовка данных"""
-    train = pd.read_csv('playground-series-s3e24/train.csv')
-    test = pd.read_csv('playground-series-s3e24/test.csv')
+    import os
+    # Определяем путь к данным относительно текущего файла
+    base_dir = os.path.dirname(os.path.abspath(__file__))
+    data_dir = os.path.join(os.path.dirname(base_dir), 'playground-series-s3e24')
+    
+    train = pd.read_csv(os.path.join(data_dir, 'train.csv'))
+    test = pd.read_csv(os.path.join(data_dir, 'test.csv'))
     
     # Сохранение id для submission
     train_ids = train['id'].copy()
