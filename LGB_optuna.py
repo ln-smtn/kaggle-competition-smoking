@@ -83,6 +83,42 @@ def category_encoding(train_category, test_category):
 
     return train_encode, test_encode
 
+def create_new_features(df):
+    df = df.copy()
+
+    # BMI (Body Mass Index)
+    if 'height(cm)' in df.columns and 'weight(kg)' in df.columns:
+        df['BMI'] = df['weight(kg)'] / ((df['height(cm)'] / 100) ** 2)
+
+    # Отношение талии к росту
+    if 'waist(cm)' in df.columns and 'height(cm)' in df.columns:
+        df['WHR'] = df['waist(cm)'] / df['height(cm)']
+
+    # Пульсовое давление
+    if 'systolic' in df.columns and 'relaxation' in df.columns:
+        df['pulse_pressure'] = df['systolic'] - df['relaxation']
+        df['mean_arterial_pressure'] = df['relaxation'] + (df['pulse_pressure'] / 3)
+
+    # Отношения холестерина
+    if 'HDL' in df.columns and 'LDL' in df.columns:
+        df['HDL_LDL_ratio'] = df['HDL'] / (df['LDL'] + 1e-6)
+        df['total_cholesterol'] = df['HDL'] + df['LDL'] + (df.get('Cholesterol', 0) / 2)
+
+    # Отношение триглицеридов к HDL
+    if 'triglyceride' in df.columns and 'HDL' in df.columns:
+        df['triglyceride_HDL_ratio'] = df['triglyceride'] / (df['HDL'] + 1e-6)
+
+    # Отношение AST к ALT
+    if 'AST' in df.columns and 'ALT' in df.columns:
+        df['AST_ALT_ratio'] = df['AST'] / (df['ALT'] + 1e-6)
+        df['liver_enzymes_sum'] = df['AST'] + df['ALT'] + df.get('Gtp', 0)
+
+    # Заполнение NaN значений медианой
+    df = df.fillna(df.median())
+
+
+    return df
+
 
 def data_preprocessing(X_train, y_train, X_test, scaler = None, category_cols = None, do_category_encoding=True):
 
@@ -113,6 +149,9 @@ def data_preprocessing(X_train, y_train, X_test, scaler = None, category_cols = 
 
     train_df = pd.concat([train_encode,scaled_train],axis =1)
     test_df = pd.concat([test_encode,scaled_test],axis =1)
+
+    train_df = create_new_features(train_df)
+    test_df = create_new_features(test_df)
 
     return train_df, test_df
 
@@ -226,9 +265,7 @@ def main():
 
     X_train, y_train, X_test, test_ids = get_input()
 
-    print(f"✓ Размер обучающей выборки: {X_train.shape}")
-    print(f"✓ Размер тестовой выборки: {X_test.shape}")
-    print(f"✓ Размер целевой переменной: {y_train.shape}")
+
     print(f"✓ Распределение классов: {np.bincount(y_train)}")
 
 
@@ -237,6 +274,10 @@ def main():
         X_train, y_train, X_test, scaler=None,
         category_cols=category_cols, do_category_encoding=True
     )
+
+    print(f"✓ Размер обучающей выборки: {X.shape}")
+    print(f"✓ Размер тестовой выборки: {test.shape}")
+    print(f"✓ Размер целевой переменной: {y_train.shape}")
 
     optimizer = OptimizerLGB(
         n_splits=5,

@@ -130,8 +130,46 @@ def data_preprocessing(X_train, y_train, X_test, scaler = None, category_cols = 
     train_df = pd.concat([train_encode,scaled_train],axis =1)
     test_df = pd.concat([test_encode,scaled_test],axis =1)
 
+    train_df = create_new_features(train_df)
+    test_df = create_new_features(test_df)
 
     return train_df, test_df
+
+def create_new_features(df):
+    df = df.copy()
+
+    # BMI (Body Mass Index)
+    if 'height(cm)' in df.columns and 'weight(kg)' in df.columns:
+        df['BMI'] = df['weight(kg)'] / ((df['height(cm)'] / 100) ** 2)
+
+    # Отношение талии к росту
+    if 'waist(cm)' in df.columns and 'height(cm)' in df.columns:
+        df['WHR'] = df['waist(cm)'] / df['height(cm)']
+
+    # Пульсовое давление
+    if 'systolic' in df.columns and 'relaxation' in df.columns:
+        df['pulse_pressure'] = df['systolic'] - df['relaxation']
+        df['mean_arterial_pressure'] = df['relaxation'] + (df['pulse_pressure'] / 3)
+
+    # Отношения холестерина
+    if 'HDL' in df.columns and 'LDL' in df.columns:
+        df['HDL_LDL_ratio'] = df['HDL'] / (df['LDL'] + 1e-6)
+        df['total_cholesterol'] = df['HDL'] + df['LDL'] + (df.get('Cholesterol', 0) / 2)
+
+    # Отношение триглицеридов к HDL
+    if 'triglyceride' in df.columns and 'HDL' in df.columns:
+        df['triglyceride_HDL_ratio'] = df['triglyceride'] / (df['HDL'] + 1e-6)
+
+    # Отношение AST к ALT
+    if 'AST' in df.columns and 'ALT' in df.columns:
+        df['AST_ALT_ratio'] = df['AST'] / (df['ALT'] + 1e-6)
+        df['liver_enzymes_sum'] = df['AST'] + df['ALT'] + df.get('Gtp', 0)
+
+    # Заполнение NaN значений медианой
+    df = df.fillna(df.median())
+
+
+    return df
 
 def main():
 
@@ -165,7 +203,7 @@ def main():
     print(f"Форма: {X.shape}")
     y = y_train
 
-    params = {'learning_rate': 0.01184431975182039, 'num_leaves': 245, 'max_depth': 10, 'min_child_samples': 32, 'subsample': 0.6624074561769746, 'colsample_bytree': 0.662397808134481, 'reg_alpha': 2.5502648504032812e-08, 'reg_lambda': 0.011567327199145964, 'n_estimators': 2083, 'objective': 'binary', 'metric': 'auc', 'n_jobs': -1, 'verbosity': -1}
+    params = {'learning_rate': 0.014441453107851188, 'num_leaves': 137, 'max_depth': 9, 'min_child_samples': 34, 'subsample': 0.991604402309641, 'colsample_bytree': 0.6929374849647897, 'reg_alpha': 3.555255370903241e-05, 'reg_lambda': 8.454317934951585e-06, 'n_estimators': 2293, 'objective': 'binary', 'metric': 'auc', 'n_jobs': -1, 'verbosity': -1}
 
 
     model = lgb.LGBMClassifier(**params)
