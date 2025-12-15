@@ -5,7 +5,7 @@ import xgboost as xgb
 from sklearn.base import BaseEstimator, TransformerMixin
 from sklearn.pipeline import Pipeline
 from sklearn.compose import ColumnTransformer
-from sklearn.preprocessing import RobustScaler, OneHotEncoder
+from sklearn.preprocessing import OneHotEncoder
 
 # =============================
 # Feature Engineering
@@ -74,7 +74,7 @@ def main():
 
     preprocessor = ColumnTransformer(
         transformers=[
-            ('num', RobustScaler(), num_cols),
+            ('num', 'passthrough', num_cols),
             ('cat', OneHotEncoder(
                 categories=[
                     [0, 1],
@@ -93,7 +93,7 @@ def main():
     # Fixed XGBoost parameters
     # =============================
 
-    xgb_params = {'learning_rate': 0.017100323336234062, 'colsample_bytree': 0.2364729936365695, 'colsample_bylevel': 0.9087856368507076, 'subsample': 0.8764606529156027, 'reg_alpha': 1.109611364016967e-06, 'reg_lambda': 0.0037321355759759325, 'max_depth': 13, 'min_child_weight': 46}
+    xgb_params = {'learning_rate': 0.018337449564255138, 'colsample_bytree': 0.2134019710295048, 'colsample_bylevel': 0.9036024360189447, 'subsample': 0.7424882202474626, 'reg_alpha': 0.017469961210395454, 'reg_lambda': 0.1315065611395556, 'max_depth': 12, 'min_child_weight': 46}
     xgb_params.update({'tree_method': 'hist',
                        'eval_metric': 'auc',
                        'n_estimators': 3000,
