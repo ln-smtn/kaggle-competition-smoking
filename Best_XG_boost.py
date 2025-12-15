@@ -93,7 +93,7 @@ def main():
     # Fixed XGBoost parameters
     # =============================
 
-    xgb_params = {'learning_rate': 0.02723529938893505, 'colsample_bytree': 0.20079254376778374, 'colsample_bylevel': 0.7912604504250316, 'subsample': 0.9414068632016721, 'reg_alpha': 2.150724658887467e-05, 'reg_lambda': 0.007781250107494212, 'max_depth': 12, 'min_child_weight': 51}
+    xgb_params ={'learning_rate': 0.011306206515504453, 'max_depth': 13, 'min_child_weight': 54, 'subsample': 0.8862682130065227, 'colsample_bytree': 0.245269488178965, 'colsample_bylevel': 0.9167365460768631, 'reg_alpha': 8.850662306093478e-05, 'reg_lambda': 0.0050498764472076295}
     xgb_params.update({'tree_method': 'hist',
                        'eval_metric': 'auc',
                        'n_estimators': 3000,
