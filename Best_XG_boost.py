@@ -93,8 +93,12 @@ def main():
     # Fixed XGBoost parameters
     # =============================
 
-    xgb_params = {'n_estimators': 3000, 'learning_rate': 0.027240097672443227, 'colsample_bytree': 0.20427850065271744, 'colsample_bylevel': 0.8241031263637338, 'subsample': 0.9772188294492674, 'reg_alpha': 3.0593511341065634e-06, 'reg_lambda': 0.01178934361616733, 'max_depth': 11, 'min_child_weight': 46}
-
+    xgb_params = {'learning_rate': 0.017940848436017145, 'max_depth': 11, 'min_child_weight': 60, 'subsample': 0.9542993050541952, 'colsample_bytree': 0.21497203607822757, 'colsample_bylevel': 0.8724464985284567, 'reg_alpha': 0.002852523609332756, 'reg_lambda': 0.1462651585929734}
+    xgb_params.update({'tree_method': 'hist',
+                       'eval_metric': 'auc',
+                       'n_estimators': 3000,
+                       'n_jobs': -1,
+                       'verbosity': 0})
     model = xgb.XGBClassifier(**xgb_params)
 
     # =============================
